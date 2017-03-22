@@ -7,8 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"time"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -34,7 +34,7 @@ func newMultifetch(group cacheGroup, tmpl string, n, total int) *multifetch {
 }
 
 func (m *multifetch) rangePages() (int, int) {
-	return 1, m.pages
+	return 0, m.pages
 }
 
 func (m *multifetch) fetch(c *cache, n int) {
@@ -47,14 +47,11 @@ func (m *multifetch) fetch(c *cache, n int) {
 			err = fmt.Errorf("cannot fetch URL %s: %s", url, err)
 		}
 		log.Printf("debug: fetch adds response to cache")
-		c.add(m.group, page{n, body}, err)
+		c.add(m.group, newPage(n, body), err)
 	}()
 }
 
 func (m *multifetch) get(url string) ([]byte, error) {
-	// XXX: For testing
-	return []byte(url), nil
-
 	tr := &http.Transport{
 		MaxIdleConns:    10,
 		IdleConnTimeout: 30 * time.Second,
@@ -74,8 +71,22 @@ func (m *multifetch) get(url string) ([]byte, error) {
 }
 
 type page struct {
-	n    int
-	body []byte
+	n        int
+	body     []byte
+	expire time.Time
+	cached   bool
+}
+
+func newPage(n int, body []byte) *page {
+	return &page{
+		n:    n,
+		body: body,
+	}
+}
+
+func (p *page) WriteTo(w io.Writer) (int, error) {
+	n, err := w.Write(p.body)
+	return n, err
 }
 
 type cacheGroup string
@@ -94,15 +105,21 @@ func newCacheEntry(d time.Duration) *cacheEntry {
 }
 
 func (ce *cacheEntry) invalid(t time.Time) bool {
-	return ce.deadline.After(t)
+	return !ce.deadline.After(t)
 }
 
-func (ce *cacheEntry) getPage(p int) ([]byte, bool) {
-	b, ok := ce.pages[p]
-	return b, ok
+func (ce *cacheEntry) getPage(n int) (*page, bool) {
+	b, ok := ce.pages[n]
+	if !ok {
+		return nil, false
+	}
+	p := newPage(n, b)
+	p.expire = ce.deadline
+	return p, ok
 }
 
-func (ce *cacheEntry) addPage(p page) {
+func (ce *cacheEntry) addPage(p *page) {
+	// TODO: I might want to bump the deadline for this entry
 	ce.pages[p.n] = p.body
 }
 
@@ -161,6 +178,7 @@ func newCache() *cache {
 		waits:   newWaiters(),
 	}
 	go c.run()
+	go c.gc(5 * time.Second) // TODO: not hardcoded
 	return c
 }
 
@@ -172,8 +190,32 @@ func (c *cache) run() {
 	}
 }
 
+func (c *cache) gc(d time.Duration) {
+	done := make(chan struct{})
+	for {
+		time.Sleep(d)
+		c.events <- func() error {
+			var purge []cacheGroup
+			now := time.Now()
+			for cgroup, entry := range c.entries {
+				if entry.invalid(now) {
+					purge = append(purge, cgroup)
+				}
+			}
+			if len(purge) > 0 {
+				for _, cgroup := range purge {
+					delete(c.entries, cgroup)
+				}
+			}
+			done <- struct{}{}
+			return nil
+		}
+		<-done
+	}
+}
+
 // add inserts a page into the cache (after it was fetched).
-func (c *cache) add(group cacheGroup, p page, err error) {
+func (c *cache) add(group cacheGroup, p *page, err error) {
 	c.events <- func() error {
 		ce, ok := c.entries[group]
 		if !ok {
@@ -181,7 +223,7 @@ func (c *cache) add(group cacheGroup, p page, err error) {
 		}
 		ce.addPage(p)
 		c.entries[group] = ce
-		log.Printf("debug: added page %s", string(p.body))
+		log.Printf("debug: added page %s/%d", group, p.n)
 		// If there were waiters, signal that the wait is over
 		c.waits.done(group, p.n)
 		return err
@@ -200,37 +242,44 @@ func (c *cache) request(group cacheGroup, n int) chan struct{} {
 	return wait
 }
 
-func (c *cache) get(group cacheGroup, n int) []byte {
+func (c *cache) get(group cacheGroup, n int) *page {
 	var (
-		body []byte
+		page *page
 		wait chan struct{}
 	)
-	done := make(chan struct{})
+	cached := true
+	requested := make(chan struct{})
 	for {
 		wait = nil
 		c.events <- func() error {
-			defer func() { done <- struct{}{} }()
+			defer func() { requested <- struct{}{} }()
+			var now time.Time
 			ce, ok := c.entries[group]
 			if !ok {
+				now = time.Now()
+			}
+			if !ok || ce.invalid(now) {
 				log.Printf("debug: %s/%d: not cached, requested", group, n)
 				wait = c.request(group, n)
 				return nil
 			}
-			body, ok = ce.pages[n]
+			page, ok = ce.getPage(n)
 			if !ok {
 				log.Printf("debug: %s/%d: not cached, requested", group, n)
 				wait = c.request(group, n)
 				return nil
 			}
-			// TODO: Should probably check if the entry is valid here
 			return nil
 		}
-		<-done
+		<-requested
 		// content was already in cache, return it
 		if wait == nil {
 			log.Printf("debug: %s/%d: found", group, n)
-			return body
+			page.cached = cached
+			return page
 		}
+		// We needed to request the object, it was not cached
+		cached = false
 		log.Printf("debug: %s/%d: waiting", group, n)
 		// content is being fetched, wait and try to get again
 		<-wait
@@ -260,13 +309,21 @@ func (o *origin) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	n := 0
 	if vars["n"] != "" {
-		if m, err := strconv.ParseInt(vars["n"], 10, 64); err != nil {
-			n = int(m)
+		m, err := strconv.ParseInt(vars["n"], 10, 64)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
 		}
+		n = int(m)
 	}
 	log.Printf("debug: %s/%d: requesting from cache", q, n)
-	body := o.cache.get(cacheGroup(q), n)
-	if _, err := w.Write(body); err != nil {
+	// TODO: there should be some sort of timeout here
+	page := o.cache.get(cacheGroup(q), n)
+	if page.cached {
+		w.Header().Set("X-From-Cache", "1");
+	}
+	w.Header().Set("X-Cached-Until", page.expire.Format(time.RFC3339))
+	if _, err := page.WriteTo(w); err != nil {
 		log.Printf("http: error writing response body: %s", err)
 	}
 }
