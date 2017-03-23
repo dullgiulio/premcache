@@ -1,3 +1,7 @@
+// Copyright 2017 Giulio Iotti. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package main
 
 import (
@@ -34,7 +38,7 @@ func (r *resource) String() string {
 }
 
 func (r *resource) cache(c *cache, body []byte, err error) {
-	log.Printf("debug: url adds response to cache")
+	debug("url adds response to cache")
 	c.put(r.cg, newPage(r.n, body), err)
 }
 
@@ -67,7 +71,7 @@ func (j *job) get() ([]byte, error) {
 }
 
 func (j *job) run() {
-	log.Printf("debug: fetch request for %s", j.res)
+	debug("fetch request for %s", j.res)
 	body, err := j.get()
 	if err != nil {
 		err = fmt.Errorf("cannot fetch URL %s: %s", j.res, err)
@@ -292,7 +296,7 @@ func (c *cache) put(cg group, p *page, err error) {
 	c.events <- func() error {
 		ce := newEntry(p.body, 2*time.Minute) // TODO: not hardcoded
 		c.entries.put(cg, p.n, ce)
-		log.Printf("debug: added page %s/%d", cg, p.n)
+		debug("added page %s/%d", cg, p.n)
 		// If there were waiters, signal that the wait is over
 		c.waits.done(cg, p.n)
 		return err
@@ -345,11 +349,11 @@ func (c *cache) get(cg group, n int) *page {
 				now = time.Now()
 			}
 			if !ok || ce.invalid(now) {
-				log.Printf("debug: %s/%d: not cached, requested", cg, n)
+				debug("%s/%d: not cached, requested", cg, n)
 				wait = c.request(cg, n)
 				return nil
 			} else {
-				log.Printf("debug: %s/%d: found", cg, n)
+				debug("%s/%d: found", cg, n)
 				c.prefetch(cg, n, 3) // TODO: Number of prefetched pages not hardcoded
 			}
 			page = ce.asPage(n)
@@ -363,7 +367,7 @@ func (c *cache) get(cg group, n int) *page {
 		}
 		// We needed to request the object, it was not cached
 		cached = false
-		log.Printf("debug: %s/%d: waiting", cg, n)
+		debug("%s/%d: waiting", cg, n)
 		// content is being fetched, wait and try to get again
 		<-wait
 	}
@@ -399,7 +403,7 @@ func (o *origin) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		n = int(m)
 	}
-	log.Printf("debug: %s/%d: requesting from cache", q, n)
+	debug("%s/%d: requesting from cache", q, n)
 	page := o.cache.get(group(q), n)
 	if page.cached {
 		w.Header().Set("X-From-Cache", "1")
