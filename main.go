@@ -15,49 +15,45 @@ import (
 
 const intergatorTmpl = "https://search.kuehne-nagel.com/web/ig-kn/?q=%s&of=%d"
 
-type multifetch struct {
-	group cacheGroup
-	q     string
-	tmpl  string
-	first int
-	pages int
+type resource struct {
+	str string
+	cg  group
+	n   int
 }
 
-func newMultifetch(group cacheGroup, tmpl string, n, total int) *multifetch {
-	return &multifetch{
-		group: group,
-		q:     url.QueryEscape(string(group)),
-		tmpl:  tmpl,
-		first: n,
-		pages: total,
+func newResource(tmpl string, cg group, n int) *resource {
+	return &resource{
+		cg:  cg,
+		n:   n,
+		str: fmt.Sprintf(tmpl, url.QueryEscape(string(cg)), n*10), // TODO: offset should not be hardcoded
 	}
 }
 
-func (m *multifetch) rangePages() (int, int) {
-	return 0, m.pages
+func (r *resource) String() string {
+	return r.str
 }
 
-func (m *multifetch) fetch(c *cache, n int) {
-	n = m.first + n
-	url := fmt.Sprintf(m.tmpl, m.q, n*10) // TODO: offset should not be hardcoded
-	log.Printf("debug: fetch request for %s", url)
-	go func() {
-		body, err := m.get(url)
-		if err != nil {
-			err = fmt.Errorf("cannot fetch URL %s: %s", url, err)
-		}
-		log.Printf("debug: fetch adds response to cache")
-		c.add(m.group, newPage(n, body), err)
-	}()
+func (r *resource) cache(c *cache, body []byte, err error) {
+	log.Printf("debug: url adds response to cache")
+	c.put(r.cg, newPage(r.n, body), err)
 }
 
-func (m *multifetch) get(url string) ([]byte, error) {
+type job struct {
+	res   *resource
+	cache *cache
+}
+
+func newJob(r *resource, c *cache) *job {
+	return &job{res: r, cache: c}
+}
+
+func (j *job) get() ([]byte, error) {
 	tr := &http.Transport{
-		MaxIdleConns:    10,
-		IdleConnTimeout: 30 * time.Second,
+		MaxIdleConns:    10,               // TODO: not hardcoded
+		IdleConnTimeout: 30 * time.Second, // TODO: not hardcoded
 	}
 	client := &http.Client{Transport: tr}
-	resp, err := client.Get(url)
+	resp, err := client.Get(j.res.String())
 	if err != nil {
 		return nil, err
 	}
@@ -70,11 +66,44 @@ func (m *multifetch) get(url string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func (j *job) run() {
+	log.Printf("debug: fetch request for %s", j.res)
+	body, err := j.get()
+	if err != nil {
+		err = fmt.Errorf("cannot fetch URL %s: %s", j.res, err)
+	}
+	j.res.cache(j.cache, body, err)
+}
+
+type fetcher struct {
+	jobs chan *job
+}
+
+func newFetcher(workers, queue int) *fetcher {
+	f := &fetcher{
+		jobs: make(chan *job, queue),
+	}
+	for i := 0; i < workers; i++ {
+		go f.run()
+	}
+	return f
+}
+
+func (f *fetcher) run() {
+	for job := range f.jobs {
+		job.run()
+	}
+}
+
+func (f *fetcher) request(j *job) {
+	f.jobs <- j
+}
+
 type page struct {
-	n        int
-	body     []byte
+	n      int
+	body   []byte
 	expire time.Time
-	cached   bool
+	cached bool
 }
 
 func newPage(n int, body []byte) *page {
@@ -89,92 +118,147 @@ func (p *page) WriteTo(w io.Writer) (int, error) {
 	return n, err
 }
 
-type cacheGroup string
+type group string
 
-type cacheEntry struct {
-	// deadline is applied to all pages because they are always accessed in order
+type entry struct {
 	deadline time.Time
-	pages    map[int][]byte
+	data     []byte
 }
 
-func newCacheEntry(d time.Duration) *cacheEntry {
-	return &cacheEntry{
+func newEntry(data []byte, d time.Duration) *entry {
+	return &entry{
 		deadline: time.Now().Add(d),
-		pages:    make(map[int][]byte),
+		data:     data,
 	}
 }
 
-func (ce *cacheEntry) invalid(t time.Time) bool {
+func (ce *entry) invalid(t time.Time) bool {
 	return !ce.deadline.After(t)
 }
 
-func (ce *cacheEntry) getPage(n int) (*page, bool) {
-	b, ok := ce.pages[n]
-	if !ok {
-		return nil, false
-	}
-	p := newPage(n, b)
+func (ce *entry) asPage(n int) *page {
+	p := newPage(n, ce.data)
 	p.expire = ce.deadline
-	return p, ok
-}
-
-func (ce *cacheEntry) addPage(p *page) {
-	// TODO: I might want to bump the deadline for this entry
-	ce.pages[p.n] = p.body
+	return p
 }
 
 type waiters struct {
-	waits map[cacheGroup]map[int]chan struct{}
+	waits map[group]map[int]chan struct{}
 }
 
 func newWaiters() *waiters {
 	return &waiters{
-		waits: make(map[cacheGroup]map[int]chan struct{}),
+		waits: make(map[group]map[int]chan struct{}),
 	}
 }
 
-func (w *waiters) wait(group cacheGroup, n int) chan struct{} {
-	if _, ok := w.waits[group]; !ok {
-		w.waits[group] = make(map[int]chan struct{})
+func (w *waiters) wait(cg group, n int) chan struct{} {
+	if _, ok := w.waits[cg]; !ok {
+		w.waits[cg] = make(map[int]chan struct{})
 	} else {
-		if ch, ok := w.waits[group][n]; ok {
+		if ch, ok := w.waits[cg][n]; ok {
 			return ch
 		}
 	}
 	ch := make(chan struct{})
-	w.waits[group][n] = ch
+	w.waits[cg][n] = ch
 	return ch
 }
 
-func (w *waiters) done(group cacheGroup, n int) {
-	_, ok := w.waits[group]
+func (w *waiters) has(cg group, n int) bool {
+	_, ok := w.waits[cg]
+	if !ok {
+		return false
+	}
+	_, ok = w.waits[cg][n]
+	return ok
+}
+
+func (w *waiters) done(cg group, n int) {
+	_, ok := w.waits[cg]
 	if !ok {
 		return
 	}
-	ch, ok := w.waits[group][n]
+	ch, ok := w.waits[cg][n]
 	if !ok {
 		return
 	}
 	close(ch)
-	delete(w.waits[group], n)
+	delete(w.waits[cg], n)
 	// Cleanup
-	if len(w.waits[group]) == 0 {
-		delete(w.waits, group)
+	if len(w.waits[cg]) == 0 {
+		delete(w.waits, cg)
+	}
+}
+
+type entries struct {
+	ents map[group]map[int]*entry
+}
+
+func newEntries() *entries {
+	return &entries{
+		ents: make(map[group]map[int]*entry),
+	}
+}
+
+func (e *entries) get(cg group, n int) (*entry, bool) {
+	pages, ok := e.ents[cg]
+	if !ok {
+		return nil, false
+	}
+	ce, ok := pages[n]
+	return ce, ok
+}
+
+func (e *entries) put(cg group, n int, ce *entry) {
+	_, ok := e.ents[cg]
+	if !ok {
+		e.ents[cg] = make(map[int]*entry)
+	}
+	e.ents[cg][n] = ce
+}
+
+func (e *entries) has(cg group, n int) bool {
+	_, ok := e.ents[cg]
+	if !ok {
+		return false
+	}
+	_, ok = e.ents[cg][n]
+	return ok
+}
+
+// remove assumes the entry exists
+func (e *entries) remove(cg group, n int) {
+	delete(e.ents[cg], n)
+	if len(e.ents[cg]) == 0 {
+		delete(e.ents, cg)
+	}
+}
+
+func (e *entries) gc(t time.Time) {
+	for cg, ents := range e.ents {
+		for n := range ents {
+			if ents[n].invalid(t) {
+				e.remove(cg, n)
+			}
+		}
 	}
 }
 
 type cacheFunc func() error
 
 type cache struct {
-	entries map[cacheGroup]*cacheEntry
+	entries *entries
 	waits   *waiters
+	fetcher *fetcher
 	events  chan cacheFunc
 }
 
-func newCache() *cache {
+func newCache(f *fetcher) *cache {
 	c := &cache{
-		entries: make(map[cacheGroup]*cacheEntry),
 		events:  make(chan cacheFunc),
+		fetcher: f,
+		entries: newEntries(),
 		waits:   newWaiters(),
 	}
 	go c.run()
@@ -195,18 +279,7 @@ func (c *cache) gc(d time.Duration) {
 	for {
 		time.Sleep(d)
 		c.events <- func() error {
-			var purge []cacheGroup
-			now := time.Now()
-			for cgroup, entry := range c.entries {
-				if entry.invalid(now) {
-					purge = append(purge, cgroup)
-				}
-			}
-			if len(purge) > 0 {
-				for _, cgroup := range purge {
-					delete(c.entries, cgroup)
-				}
-			}
+			c.entries.gc(time.Now())
 			done <- struct{}{}
 			return nil
 		}
@@ -214,35 +287,48 @@ func (c *cache) gc(d time.Duration) {
 	}
 }
 
-// add inserts a page into the cache (after it was fetched).
-func (c *cache) add(group cacheGroup, p *page, err error) {
+// put inserts a page into the cache (after it was fetched).
+func (c *cache) put(cg group, p *page, err error) {
 	c.events <- func() error {
-		ce, ok := c.entries[group]
-		if !ok {
-			ce = newCacheEntry(5 * time.Minute)
-		}
-		ce.addPage(p)
-		c.entries[group] = ce
-		log.Printf("debug: added page %s/%d", group, p.n)
+		ce := newEntry(p.body, 2*time.Minute) // TODO: not hardcoded
+		c.entries.put(cg, p.n, ce)
+		log.Printf("debug: added page %s/%d", cg, p.n)
 		// If there were waiters, signal that the wait is over
-		c.waits.done(group, p.n)
+		c.waits.done(cg, p.n)
 		return err
 	}
 }
 
-func (c *cache) request(group cacheGroup, n int) chan struct{} {
-	wait := c.waits.wait(group, n)
-	mf := newMultifetch(group, intergatorTmpl, n, 3)
-	mf.fetch(c, n)
-	lo, hi := mf.rangePages()
-	for ; lo < hi; lo++ {
-		c.waits.wait(group, lo)
-		mf.fetch(c, lo)
+// prefetch requests pages (n-m, n) and (n, n+m) if not already fetched
+func (c *cache) prefetch(cg group, n, m int) {
+	i := n - m
+	if i < 0 {
+		i = 0
 	}
+	for i := 0; i < n+m; i++ {
+		if i == n {
+			// just fetched
+			continue
+		}
+		if c.entries.has(cg, i) || c.waits.has(cg, i) {
+			// already fetched or requested
+			continue
+		}
+		c.waits.wait(cg, i)
+		res := newResource(intergatorTmpl, cg, i)
+		c.fetcher.request(newJob(res, c))
+	}
+}
+
+func (c *cache) request(cg group, n int) chan struct{} {
+	wait := c.waits.wait(cg, n)
+	res := newResource(intergatorTmpl, cg, n)
+	c.fetcher.request(newJob(res, c))
+	c.prefetch(cg, n, 3) // TODO: Number of prefetched pages not hardcoded
 	return wait
 }
 
-func (c *cache) get(group cacheGroup, n int) *page {
+func (c *cache) get(cg group, n int) *page {
 	var (
 		page *page
 		wait chan struct{}
@@ -254,33 +340,30 @@ func (c *cache) get(group cacheGroup, n int) *page {
 		c.events <- func() error {
 			defer func() { requested <- struct{}{} }()
 			var now time.Time
-			ce, ok := c.entries[group]
-			if !ok {
+			ce, ok := c.entries.get(cg, n)
+			if ok {
 				now = time.Now()
 			}
 			if !ok || ce.invalid(now) {
-				log.Printf("debug: %s/%d: not cached, requested", group, n)
-				wait = c.request(group, n)
+				log.Printf("debug: %s/%d: not cached, requested", cg, n)
+				wait = c.request(cg, n)
 				return nil
+			} else {
+				log.Printf("debug: %s/%d: found", cg, n)
+				c.prefetch(cg, n, 3) // TODO: Number of prefetched pages not hardcoded
 			}
-			page, ok = ce.getPage(n)
-			if !ok {
-				log.Printf("debug: %s/%d: not cached, requested", group, n)
-				wait = c.request(group, n)
-				return nil
-			}
+			page = ce.asPage(n)
 			return nil
 		}
 		<-requested
 		// content was already in cache, return it
 		if wait == nil {
-			log.Printf("debug: %s/%d: found", group, n)
 			page.cached = cached
 			return page
 		}
 		// We needed to request the object, it was not cached
 		cached = false
-		log.Printf("debug: %s/%d: waiting", group, n)
+		log.Printf("debug: %s/%d: waiting", cg, n)
 		// content is being fetched, wait and try to get again
 		<-wait
 	}
@@ -293,10 +376,10 @@ type origin struct {
 	cache *cache
 }
 
-func newOrigin(name string) *origin {
+func newOrigin(name string, f *fetcher) *origin {
 	return &origin{
 		name:  name,
-		cache: newCache(),
+		cache: newCache(f),
 	}
 }
 
@@ -317,10 +400,9 @@ func (o *origin) handle(w http.ResponseWriter, r *http.Request) {
 		n = int(m)
 	}
 	log.Printf("debug: %s/%d: requesting from cache", q, n)
-	// TODO: there should be some sort of timeout here
-	page := o.cache.get(cacheGroup(q), n)
+	page := o.cache.get(group(q), n)
 	if page.cached {
-		w.Header().Set("X-From-Cache", "1");
+		w.Header().Set("X-From-Cache", "1")
 	}
 	w.Header().Set("X-Cached-Until", page.expire.Format(time.RFC3339))
 	if _, err := page.WriteTo(w); err != nil {
@@ -350,8 +432,9 @@ func (ors *origins) initRouter(r *mux.Router) {
 }
 
 func main() {
+	fetcher := newFetcher(10, 20) // TODO: From arguments
 	origins := newOrigins()
-	origins.add(newOrigin("intergator"))
+	origins.add(newOrigin("intergator", fetcher))
 
 	r := mux.NewRouter()
 	origins.initRouter(r)
