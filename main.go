@@ -17,19 +17,19 @@ import (
 	"github.com/gorilla/mux"
 )
 
-const intergatorTmpl = "https://search.kuehne-nagel.com/web/ig-kn/?q=%s&of=%d"
+type offset int
 
 type resource struct {
 	str string
 	cg  group
-	n   int
+	n   offset
 }
 
-func newResource(tmpl string, cg group, n int) *resource {
+func newResource(tmpl string, cg group, n offset) *resource {
 	return &resource{
 		cg:  cg,
 		n:   n,
-		str: fmt.Sprintf(tmpl, url.QueryEscape(string(cg)), n*10), // TODO: offset should not be hardcoded
+		str: fmt.Sprintf(tmpl, url.QueryEscape(string(cg)), n),
 	}
 }
 
@@ -38,7 +38,6 @@ func (r *resource) String() string {
 }
 
 func (r *resource) cache(c *cache, body []byte, err error) {
-	debug("url adds response to cache")
 	c.put(r.cg, newPage(r.n, body), err)
 }
 
@@ -104,13 +103,13 @@ func (f *fetcher) request(j *job) {
 }
 
 type page struct {
-	n      int
+	n      offset
 	body   []byte
 	expire time.Time
 	cached bool
 }
 
-func newPage(n int, body []byte) *page {
+func newPage(n offset, body []byte) *page {
 	return &page{
 		n:    n,
 		body: body,
@@ -140,25 +139,25 @@ func (ce *entry) invalid(t time.Time) bool {
 	return !ce.deadline.After(t)
 }
 
-func (ce *entry) asPage(n int) *page {
+func (ce *entry) asPage(n offset) *page {
 	p := newPage(n, ce.data)
 	p.expire = ce.deadline
 	return p
 }
 
 type waiters struct {
-	waits map[group]map[int]chan struct{}
+	waits map[group]map[offset]chan struct{}
 }
 
 func newWaiters() *waiters {
 	return &waiters{
-		waits: make(map[group]map[int]chan struct{}),
+		waits: make(map[group]map[offset]chan struct{}),
 	}
 }
 
-func (w *waiters) wait(cg group, n int) chan struct{} {
+func (w *waiters) wait(cg group, n offset) chan struct{} {
 	if _, ok := w.waits[cg]; !ok {
-		w.waits[cg] = make(map[int]chan struct{})
+		w.waits[cg] = make(map[offset]chan struct{})
 	} else {
 		if ch, ok := w.waits[cg][n]; ok {
 			return ch
@@ -169,7 +168,7 @@ func (w *waiters) wait(cg group, n int) chan struct{} {
 	return ch
 }
 
-func (w *waiters) has(cg group, n int) bool {
+func (w *waiters) has(cg group, n offset) bool {
 	_, ok := w.waits[cg]
 	if !ok {
 		return false
@@ -178,7 +177,7 @@ func (w *waiters) has(cg group, n int) bool {
 	return ok
 }
 
-func (w *waiters) done(cg group, n int) {
+func (w *waiters) done(cg group, n offset) {
 	_, ok := w.waits[cg]
 	if !ok {
 		return
@@ -196,16 +195,16 @@ func (w *waiters) done(cg group, n int) {
 }
 
 type entries struct {
-	ents map[group]map[int]*entry
+	ents map[group]map[offset]*entry
 }
 
 func newEntries() *entries {
 	return &entries{
-		ents: make(map[group]map[int]*entry),
+		ents: make(map[group]map[offset]*entry),
 	}
 }
 
-func (e *entries) get(cg group, n int) (*entry, bool) {
+func (e *entries) get(cg group, n offset) (*entry, bool) {
 	pages, ok := e.ents[cg]
 	if !ok {
 		return nil, false
@@ -214,15 +213,15 @@ func (e *entries) get(cg group, n int) (*entry, bool) {
 	return ce, ok
 }
 
-func (e *entries) put(cg group, n int, ce *entry) {
+func (e *entries) put(cg group, n offset, ce *entry) {
 	_, ok := e.ents[cg]
 	if !ok {
-		e.ents[cg] = make(map[int]*entry)
+		e.ents[cg] = make(map[offset]*entry)
 	}
 	e.ents[cg][n] = ce
 }
 
-func (e *entries) has(cg group, n int) bool {
+func (e *entries) has(cg group, n offset) bool {
 	_, ok := e.ents[cg]
 	if !ok {
 		return false
@@ -232,7 +231,7 @@ func (e *entries) has(cg group, n int) bool {
 }
 
 // remove assumes the entry exists
-func (e *entries) remove(cg group, n int) {
+func (e *entries) remove(cg group, n offset) {
 	delete(e.ents[cg], n)
 	if len(e.ents[cg]) == 0 {
 		delete(e.ents, cg)
@@ -249,24 +248,44 @@ func (e *entries) gc(t time.Time) {
 	}
 }
 
+type config struct {
+	lifetime time.Duration
+	gcpause  time.Duration
+	tmpl     string
+	npref    int
+	incr     int
+}
+
+func newConfig(tmpl string, incr int) *config {
+	return &config{
+		tmpl:     tmpl,
+		incr:     incr,
+		lifetime: 5 * time.Minute,
+		gcpause:  20 * time.Second,
+		npref:    4,
+	}
+}
+
 type cacheFunc func() error
 
 type cache struct {
 	entries *entries
 	waits   *waiters
 	fetcher *fetcher
+	config  *config
 	events  chan cacheFunc
 }
 
-func newCache(f *fetcher) *cache {
+func newCache(f *fetcher, cf *config) *cache {
 	c := &cache{
-		events:  make(chan cacheFunc),
 		fetcher: f,
+		config:  cf,
+		events:  make(chan cacheFunc),
 		entries: newEntries(),
 		waits:   newWaiters(),
 	}
+	go c.gc(cf.gcpause)
 	go c.run()
-	go c.gc(5 * time.Second) // TODO: not hardcoded
 	return c
 }
 
@@ -294,7 +313,7 @@ func (c *cache) gc(d time.Duration) {
 // put inserts a page into the cache (after it was fetched).
 func (c *cache) put(cg group, p *page, err error) {
 	c.events <- func() error {
-		ce := newEntry(p.body, 2*time.Minute) // TODO: not hardcoded
+		ce := newEntry(p.body, c.config.lifetime)
 		c.entries.put(cg, p.n, ce)
 		debug("added page %s/%d", cg, p.n)
 		// If there were waiters, signal that the wait is over
@@ -314,21 +333,23 @@ func (c *cache) prefetch(cg group, n, m int) {
 			// just fetched
 			continue
 		}
-		if c.entries.has(cg, i) || c.waits.has(cg, i) {
+		off := offset(i*c.config.incr)
+		if c.entries.has(cg, off) || c.waits.has(cg, off) {
 			// already fetched or requested
 			continue
 		}
-		c.waits.wait(cg, i)
-		res := newResource(intergatorTmpl, cg, i)
+		c.waits.wait(cg, off)
+		res := newResource(c.config.tmpl, cg, off)
 		c.fetcher.request(newJob(res, c))
 	}
 }
 
 func (c *cache) request(cg group, n int) chan struct{} {
-	wait := c.waits.wait(cg, n)
-	res := newResource(intergatorTmpl, cg, n)
+	off := offset(n*c.config.incr)
+	wait := c.waits.wait(cg, off)
+	res := newResource(c.config.tmpl, cg, off)
 	c.fetcher.request(newJob(res, c))
-	c.prefetch(cg, n, 3) // TODO: Number of prefetched pages not hardcoded
+	c.prefetch(cg, n, c.config.npref)
 	return wait
 }
 
@@ -339,24 +360,26 @@ func (c *cache) get(cg group, n int) *page {
 	)
 	cached := true
 	requested := make(chan struct{})
+	off := offset(n*c.config.incr)
+	debug("%s/%d: requesting from cache", cg, off)
 	for {
 		wait = nil
 		c.events <- func() error {
 			defer func() { requested <- struct{}{} }()
 			var now time.Time
-			ce, ok := c.entries.get(cg, n)
+			ce, ok := c.entries.get(cg, off)
 			if ok {
 				now = time.Now()
 			}
 			if !ok || ce.invalid(now) {
-				debug("%s/%d: not cached, requested", cg, n)
+				debug("%s/%d: not cached, requested", cg, off)
 				wait = c.request(cg, n)
 				return nil
 			} else {
-				debug("%s/%d: found", cg, n)
-				c.prefetch(cg, n, 3) // TODO: Number of prefetched pages not hardcoded
+				debug("%s/%d: found", cg, off)
+				c.prefetch(cg, n, c.config.npref)
 			}
-			page = ce.asPage(n)
+			page = ce.asPage(off)
 			return nil
 		}
 		<-requested
@@ -367,7 +390,6 @@ func (c *cache) get(cg group, n int) *page {
 		}
 		// We needed to request the object, it was not cached
 		cached = false
-		debug("%s/%d: waiting", cg, n)
 		// content is being fetched, wait and try to get again
 		<-wait
 	}
@@ -380,17 +402,17 @@ type origin struct {
 	cache *cache
 }
 
-func newOrigin(name string, f *fetcher) *origin {
+func newOrigin(name string, f *fetcher, cf *config) *origin {
 	return &origin{
 		name:  name,
-		cache: newCache(f),
+		cache: newCache(f, cf),
 	}
 }
 
 func (o *origin) handle(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	q := vars["q"]
-	if q == "" {
+	cg := group(vars["q"])
+	if cg == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -403,8 +425,7 @@ func (o *origin) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		n = int(m)
 	}
-	debug("%s/%d: requesting from cache", q, n)
-	page := o.cache.get(group(q), n)
+	page := o.cache.get(cg, n)
 	if page.cached {
 		w.Header().Set("X-From-Cache", "1")
 	}
@@ -435,10 +456,13 @@ func (ors *origins) initRouter(r *mux.Router) {
 	}
 }
 
+const intergatorTmpl = "https://search.kuehne-nagel.com/web/ig-kn/?q=%s&of=%d"
+
 func main() {
-	fetcher := newFetcher(10, 20) // TODO: From arguments
+	config := newConfig(intergatorTmpl, 10) // TODO: not hardcoded
+	fetcher := newFetcher(10, 20)           // TODO: From arguments
 	origins := newOrigins()
-	origins.add(newOrigin("intergator", fetcher))
+	origins.add(newOrigin("intergator", fetcher, config))
 
 	r := mux.NewRouter()
 	origins.initRouter(r)
