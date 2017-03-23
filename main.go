@@ -309,7 +309,7 @@ func (c *cache) prefetch(cg group, n, m int) {
 	if i < 0 {
 		i = 0
 	}
-	for i := 0; i < n+m; i++ {
+	for ; i < n+m; i++ {
 		if i == n {
 			// just fetched
 			continue
