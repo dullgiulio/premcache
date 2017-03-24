@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -52,6 +53,13 @@ func (o *origin) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (o *origin) stats(w http.ResponseWriter, r *http.Request) {
+	st := o.cache.stats()
+	if err := json.NewEncoder(w).Encode(st); err != nil {
+		http.Error(w, err.Error(), 500)
+	}
+}
+
 type origins struct {
 	o map[string]*origin
 }
@@ -70,5 +78,6 @@ func (ors *origins) initRouter(r *mux.Router) {
 	for k := range ors.o {
 		r.HandleFunc(fmt.Sprintf("/%s/search/{q}", ors.o[k].name), ors.o[k].handle)
 		r.HandleFunc(fmt.Sprintf("/%s/search/{q}/{n}", ors.o[k].name), ors.o[k].handle)
+		r.HandleFunc(fmt.Sprintf("/_/%s/stats", ors.o[k].name), ors.o[k].stats)
 	}
 }

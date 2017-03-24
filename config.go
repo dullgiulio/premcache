@@ -23,3 +23,31 @@ func newConfig(tmpl string, incr int) *config {
 		npref:    4,
 	}
 }
+
+type stats struct {
+	Entries  int
+	Waiters  int
+	Requests int
+	Cached   int
+	Mem      int64
+}
+
+func newStats() *stats {
+	return &stats{}
+}
+
+func (s *stats) mem(n int) {
+	s.Mem += int64(n)
+}
+
+func (s *stats) hit(cached bool) {
+	if cached {
+		s.Cached++
+	}
+	s.Requests++
+}
+
+func (s *stats) clone() *stats {
+	st := *s
+	return &st
+}

@@ -14,6 +14,14 @@ func newWaiters() *waiters {
 	}
 }
 
+func (w *waiters) count() int {
+	tot := 0
+	for k := range w.waits {
+		tot += len(w.waits[k])
+	}
+	return tot
+}
+
 func (w *waiters) wait(cg group, n offset) chan struct{} {
 	if _, ok := w.waits[cg]; !ok {
 		w.waits[cg] = make(map[offset]chan struct{})
