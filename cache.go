@@ -242,10 +242,9 @@ func (c *cache) get(cg group, n int) *page {
 				debug("%s/%d: not cached, requested", cg, off)
 				wait = c.request(cg, n)
 				return nil
-			} else {
-				debug("%s/%d: found", cg, off)
-				c.prefetch(cg, n, c.config.npref)
 			}
+			debug("%s/%d: found", cg, off)
+			c.prefetch(cg, n, c.config.npref)
 			c.stat.hit(cached)
 			page = ce.asPage(off)
 			return nil
