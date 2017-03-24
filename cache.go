@@ -24,9 +24,9 @@ func newPage(n offset, body []byte) *page {
 	}
 }
 
-func (p *page) WriteTo(w io.Writer) (int, error) {
+func (p *page) WriteTo(w io.Writer) (int64, error) {
 	n, err := w.Write(p.body)
-	return n, err
+	return int64(n), err
 }
 
 type group string
@@ -234,6 +234,4 @@ func (c *cache) get(cg group, n int) *page {
 		// content is being fetched, wait and try to get again
 		<-wait
 	}
-	// unreacheable
-	return nil
 }
