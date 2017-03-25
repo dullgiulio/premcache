@@ -54,13 +54,13 @@ func (j *job) get() ([]byte, error) {
 	client := &http.Client{Transport: tr}
 	resp, err := client.Get(j.res.String())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot GET %s: %s", j.res, err)
 	}
 	defer resp.Body.Close()
 	buf := &bytes.Buffer{}
 	_, err = io.Copy(buf, resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot copy data from %s: %s", j.res, err)
 	}
 	return buf.Bytes(), nil
 }
