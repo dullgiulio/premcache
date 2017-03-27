@@ -7,6 +7,7 @@ package main
 import (
 	"io"
 	"log"
+	"sort"
 	"time"
 )
 
@@ -105,6 +106,30 @@ func (e *entries) remove(cg group, n offset) {
 	}
 }
 
+func (e *entries) purge(cg group, st *stats) {
+	st.mem(-e.sizeof(cg))
+	delete(e.ents, cg)
+}
+
+func (e *entries) sizeof(cg group) int {
+	var s int
+	for n := range e.ents[cg] {
+		s += len(e.ents[cg][n].data)
+	}
+	return s
+}
+
+func (e *entries) oldestDeadline(cg group) time.Time {
+	var t time.Time
+	for off := range e.ents[cg] {
+		entry := e.ents[cg][off]
+		if t.IsZero() || t.After(entry.deadline) {
+			t = entry.deadline
+		}
+	}
+	return t
+}
+
 func (e *entries) gc(t time.Time, st *stats) {
 	for cg, ents := range e.ents {
 		for n := range ents {
@@ -162,6 +187,58 @@ func (c *cache) gc(d time.Duration) {
 	}
 }
 
+type timeGroup struct {
+	t  time.Time
+	cg group
+}
+
+type timeGroups struct {
+	entries []timeGroup
+}
+
+type byTime []timeGroup
+
+func (a byTime) Len() int           { return len(a) }
+func (a byTime) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a byTime) Less(i, j int) bool { return a[i].t.After(a[j].t) }
+
+func makeTimeGroups(e *entries) timeGroups {
+	var i int
+	tg := make([]timeGroup, len(e.ents))
+	for cg := range e.ents {
+		tg[i] = timeGroup{
+			t:  e.oldestDeadline(cg),
+			cg: cg,
+		}
+		i++
+	}
+	sort.Sort(byTime(tg))
+	return timeGroups{tg}
+}
+
+func (tg *timeGroups) purgeOldest(c *cache) {
+	entry, ts := tg.entries[len(tg.entries)-1], tg.entries[0:len(tg.entries)-1]
+	c.entries.purge(entry.cg, c.stat)
+	tg.entries = ts
+}
+
+func (tg *timeGroups) empty() bool {
+	return len(tg.entries) == 0
+}
+
+func (c *cache) oom(target int64) {
+	debug("OOM called: using %d, limit is %d", c.stat.Mem, target)
+	tg := makeTimeGroups(c.entries)
+	for {
+		tg.purgeOldest(c)
+		// Repeat unless we have no more entries or we are using less memory than target
+		if tg.empty() || !c.stat.above(target) {
+			break
+		}
+	}
+	debug("OOM: mem now %d", c.stat.Mem)
+}
+
 // put inserts a page into the cache (after it was fetched).
 func (c *cache) put(cg group, p *page, err error) {
 	c.events <- func() error {
@@ -169,6 +246,14 @@ func (c *cache) put(cg group, p *page, err error) {
 		c.entries.put(cg, p.n, ce)
 		debug("added page %s/%d", cg, p.n)
 		c.stat.mem(len(p.body))
+		if c.stat.above(c.config.maxMemory) {
+			go func() {
+				c.events <- func() error {
+					c.oom(c.config.maxMemory)
+					return nil
+				}
+			}()
+		}
 		// If there were waiters, signal that the wait is over
 		c.waits.done(cg, p.n)
 		return err

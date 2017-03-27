@@ -7,20 +7,22 @@ package main
 import "time"
 
 type config struct {
-	lifetime time.Duration
-	gcpause  time.Duration
-	tmpl     string
-	npref    int
-	incr     int
+	lifetime  time.Duration
+	gcpause   time.Duration
+	tmpl      string
+	npref     int
+	incr      int
+	maxMemory int64
 }
 
 func newConfig(tmpl string, incr int) *config {
 	return &config{
-		tmpl:     tmpl,
-		incr:     incr,
-		lifetime: 5 * time.Minute,
-		gcpause:  20 * time.Second,
-		npref:    4,
+		tmpl:      tmpl,
+		incr:      incr,
+		lifetime:  5 * time.Minute,
+		gcpause:   20 * time.Second,
+		npref:     4,
+		maxMemory: 1024 * 1024 * 256, // 256MB
 	}
 }
 
@@ -45,6 +47,10 @@ func (s *stats) hit(cached bool) {
 		s.Cached++
 	}
 	s.Requests++
+}
+
+func (s *stats) above(mem int64) bool {
+	return s.Mem >= mem
 }
 
 func (s *stats) clone() *stats {
