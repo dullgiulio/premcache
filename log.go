@@ -2,6 +2,10 @@ package main
 
 import "log"
 
+var verbose bool
+
 func debug(fmt string, args ...interface{}) {
-	log.Printf("debug: "+fmt, args...)
+	if verbose {
+		log.Printf("debug: "+fmt, args...)
+	}
 }
