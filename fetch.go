@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -25,7 +24,7 @@ func newResource(tmpl string, cg group, n offset) *resource {
 	return &resource{
 		cg:  cg,
 		n:   n,
-		str: fmt.Sprintf(tmpl, url.QueryEscape(string(cg)), n),
+		str: fmt.Sprintf(tmpl, string(cg), n),
 	}
 }
 
