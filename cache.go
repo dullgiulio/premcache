@@ -248,9 +248,13 @@ func (c *cache) oom(target int64) {
 func (c *cache) put(cg group, p *page, err error) {
 	c.events <- func() error {
 		ce := newEntry(p.body, c.config.lifetime)
+		// If an entry exists, it will be overwritten
+		if ent, ok := c.entries.get(cg, p.n); ok {
+			c.stat.mem(-len(ent.data))
+		}
 		c.entries.put(cg, p.n, ce)
-		debug("added page %s/%d", cg, p.n)
 		c.stat.mem(len(p.body))
+		debug("added page %s/%d", cg, p.n)
 		if c.stat.above(c.config.maxMemory) {
 			go func() {
 				c.events <- func() error {
