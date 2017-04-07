@@ -89,13 +89,16 @@ func (e *entries) put(cg group, n offset, ce *entry) {
 	e.ents[cg][n] = ce
 }
 
-func (e *entries) has(cg group, n offset) bool {
+func (e *entries) has(cg group, n offset, t time.Time) bool {
 	_, ok := e.ents[cg]
 	if !ok {
 		return false
 	}
-	_, ok = e.ents[cg][n]
-	return ok
+	ent, ok := e.ents[cg][n]
+	if !ok {
+		return false
+	}
+	return !ent.invalid(t)
 }
 
 // remove assumes the entry exists
@@ -263,7 +266,7 @@ func (c *cache) put(cg group, p *page, err error) {
 }
 
 // prefetch requests pages (n-m, n) and (n, n+m) if not already fetched
-func (c *cache) prefetch(cg group, n, m int) {
+func (c *cache) prefetch(cg group, n, m int, t time.Time) {
 	i := n - m
 	if i < 0 {
 		i = 0
@@ -274,7 +277,7 @@ func (c *cache) prefetch(cg group, n, m int) {
 			continue
 		}
 		off := offset(i * c.config.incr)
-		if c.entries.has(cg, off) || c.waits.has(cg, off) {
+		if c.entries.has(cg, off, t) || c.waits.has(cg, off) {
 			// already fetched or requested
 			continue
 		}
@@ -284,12 +287,12 @@ func (c *cache) prefetch(cg group, n, m int) {
 	}
 }
 
-func (c *cache) request(cg group, n int) chan struct{} {
+func (c *cache) request(cg group, n int, t time.Time) chan struct{} {
 	off := offset(n * c.config.incr)
 	wait := c.waits.wait(cg, off)
 	res := newResource(c.config.tmpl, cg, off)
 	c.fetcher.request(newJob(res, c))
-	c.prefetch(cg, n, c.config.npref)
+	c.prefetch(cg, n, c.config.npref, t)
 	return wait
 }
 
@@ -327,11 +330,11 @@ func (c *cache) get(cg group, n int) *page {
 			}
 			if !ok || ce.invalid(now) {
 				debug("%s/%d: not cached, requested", cg, off)
-				wait = c.request(cg, n)
+				wait = c.request(cg, n, now)
 				return nil
 			}
 			debug("%s/%d: found", cg, off)
-			c.prefetch(cg, n, c.config.npref)
+			c.prefetch(cg, n, c.config.npref, now)
 			c.stat.hit(cached)
 			page = ce.asPage(off)
 			return nil
