@@ -75,6 +75,7 @@ func (ors *origins) add(o *origin) {
 }
 
 func (ors *origins) initRouter(r *mux.Router) {
+	r.UseEncodedPath()
 	for k := range ors.o {
 		r.HandleFunc(fmt.Sprintf("/%s/search/{q}", ors.o[k].name), ors.o[k].handle)
 		r.HandleFunc(fmt.Sprintf("/%s/search/{q}/{n}", ors.o[k].name), ors.o[k].handle)
