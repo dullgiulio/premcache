@@ -65,7 +65,7 @@ func (j *job) get() ([]byte, error) {
 }
 
 func (j *job) run() {
-	debug("fetch request for %s", j.res)
+	j.cache.debug("fetch request for %s", j.res)
 	body, err := j.get()
 	if err != nil {
 		err = fmt.Errorf("cannot fetch URL %s: %s", j.res, err)

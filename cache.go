@@ -153,9 +153,10 @@ type cache struct {
 	config  *config
 	stat    *stats
 	events  chan cacheFunc
+	debug   func(string, ...interface{})
 }
 
-func newCache(f *fetcher, cf *config) *cache {
+func newCache(f *fetcher, logs *logbuf, cf *config) *cache {
 	c := &cache{
 		fetcher: f,
 		config:  cf,
@@ -163,6 +164,7 @@ func newCache(f *fetcher, cf *config) *cache {
 		entries: newEntries(),
 		waits:   newWaiters(),
 		stat:    newStats(),
+		debug:   logs.debug,
 	}
 	go c.gc(cf.gcpause)
 	go c.run()
@@ -182,9 +184,9 @@ func (c *cache) gc(d time.Duration) {
 	for {
 		time.Sleep(d)
 		c.events <- func() error {
-			debug("running garbage collector cycle, memory is %d", c.stat.Mem)
+			c.debug("running garbage collector cycle, memory is %d", c.stat.Mem)
 			c.entries.gc(time.Now(), c.stat)
-			debug("garbage collection done, memory is %d", c.stat.Mem)
+			c.debug("garbage collection done, memory is %d", c.stat.Mem)
 			done <- struct{}{}
 			return nil
 		}
@@ -232,7 +234,7 @@ func (tg *timeGroups) empty() bool {
 }
 
 func (c *cache) oom(target int64) {
-	debug("OOM called: using %d, limit is %d", c.stat.Mem, target)
+	c.debug("OOM called: using %d, limit is %d", c.stat.Mem, target)
 	tg := makeTimeGroups(c.entries)
 	for {
 		tg.purgeOldest(c)
@@ -241,7 +243,7 @@ func (c *cache) oom(target int64) {
 			break
 		}
 	}
-	debug("OOM: mem now %d", c.stat.Mem)
+	c.debug("OOM: mem now %d", c.stat.Mem)
 }
 
 // put inserts a page into the cache (after it was fetched).
@@ -254,7 +256,7 @@ func (c *cache) put(cg group, p *page, err error) {
 		}
 		c.entries.put(cg, p.n, ce)
 		c.stat.mem(len(p.body))
-		debug("added page %s/%d", cg, p.n)
+		c.debug("added page %s/%d", cg, p.n)
 		if c.stat.above(c.config.maxMemory) {
 			go func() {
 				c.events <- func() error {
@@ -322,7 +324,7 @@ func (c *cache) get(cg group, n int) *page {
 	cached := true
 	requested := make(chan struct{})
 	off := offset(n * c.config.incr)
-	debug("%s/%d: requesting from cache", cg, off)
+	c.debug("%s/%d: requesting from cache", cg, off)
 	for {
 		wait = nil
 		c.events <- func() error {
@@ -333,11 +335,11 @@ func (c *cache) get(cg group, n int) *page {
 				now = time.Now()
 			}
 			if !ok || ce.invalid(now) {
-				debug("%s/%d: not cached, requested", cg, off)
+				c.debug("%s/%d: not cached, requested", cg, off)
 				wait = c.request(cg, n, now)
 				return nil
 			}
-			debug("%s/%d: found", cg, off)
+			c.debug("%s/%d: found", cg, off)
 			c.prefetch(cg, n, c.config.npref, now)
 			c.stat.hit(cached)
 			page = ce.asPage(off)

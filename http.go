@@ -17,13 +17,15 @@ import (
 
 type origin struct {
 	name  string
+	logs  *logbuf
 	cache *cache
 }
 
-func newOrigin(name string, f *fetcher, cf *config) *origin {
+func newOrigin(name string, f *fetcher, cf *config, logs *logbuf) *origin {
 	return &origin{
 		name:  name,
-		cache: newCache(f, cf),
+		logs:  logs,
+		cache: newCache(f, logs, cf),
 	}
 }
 
@@ -60,6 +62,12 @@ func (o *origin) stats(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (o *origin) dumplogs(w http.ResponseWriter, r *http.Request) {
+	if _, err := o.logs.WriteTo(w); err != nil {
+		http.Error(w, err.Error(), 500)
+	}
+}
+
 type origins struct {
 	o map[string]*origin
 }
@@ -80,5 +88,6 @@ func (ors *origins) initRouter(r *mux.Router) {
 		r.HandleFunc(fmt.Sprintf("/%s/search/{q}", ors.o[k].name), ors.o[k].handle)
 		r.HandleFunc(fmt.Sprintf("/%s/search/{q}/{n}", ors.o[k].name), ors.o[k].handle)
 		r.HandleFunc(fmt.Sprintf("/_/%s/stats", ors.o[k].name), ors.o[k].stats)
+		r.HandleFunc(fmt.Sprintf("/_/%s/logs", ors.o[k].name), ors.o[k].dumplogs)
 	}
 }

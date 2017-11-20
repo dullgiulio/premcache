@@ -17,9 +17,11 @@ const intergatorTmpl = "https://search.kuehne-nagel.com/web/ig-kn/?q=%s&of=%d"
 
 func main() {
 	var (
+		verbose        bool
 		name           string
 		tmpl           string
 		listen         string
+		nlogs          int
 		incr           int
 		maxmem         int
 		gcpause        int
@@ -40,6 +42,7 @@ func main() {
 	flag.IntVar(&fetcherPages, "npref", 4, "Number of pages to prefetch")
 	flag.IntVar(&gclifetime, "lifetime", 5, "Time an entry is kept in cache, in minutes")     // TODO: Parse time
 	flag.IntVar(&gcpause, "gcpause", 20, "Interval between GC runs in the cache, in seconds") // TODO: Parse time
+	flag.IntVar(&nlogs, "nlogs", 100, "Max number of lines of logs to store for each origin")
 	flag.Parse()
 
 	config := newConfig(tmpl, incr)
@@ -50,7 +53,7 @@ func main() {
 
 	fetcher := newFetcher(fetcherWorkers, fetcherQueue)
 	origins := newOrigins()
-	origins.add(newOrigin(name, fetcher, config))
+	origins.add(newOrigin(name, fetcher, config, newLogbuf(nlogs, verbose)))
 
 	r := mux.NewRouter()
 	origins.initRouter(r)
