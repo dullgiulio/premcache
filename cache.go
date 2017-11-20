@@ -329,6 +329,9 @@ func (c *cache) get(cg group, n int) *page {
 		wait = nil
 		c.events <- func() error {
 			defer func() { requested <- struct{}{} }()
+			if c.waits.has(cg, off) {
+				c.waits.wait(cg, off)
+			}
 			var now time.Time
 			ce, ok := c.entries.get(cg, off)
 			if ok {
