@@ -184,9 +184,11 @@ func (c *cache) gc(d time.Duration) {
 	for {
 		time.Sleep(d)
 		c.events <- func() error {
-			c.debug("running garbage collector cycle, memory is %d", c.stat.Mem)
-			c.entries.gc(time.Now(), c.stat)
-			c.debug("garbage collection done, memory is %d", c.stat.Mem)
+			if c.stat.Mem > 0 {
+				c.debug("running garbage collector cycle, memory is %d", c.stat.Mem)
+				c.entries.gc(time.Now(), c.stat)
+				c.debug("garbage collection done, memory is %d", c.stat.Mem)
+			}
 			done <- struct{}{}
 			return nil
 		}
